@@ -59,6 +59,15 @@ func main() {
 			continue
 		}
 
+		startedAt := time.Now()
+		log.Printf(
+			"worker %s processing job %s range [%d,%d)",
+			cfg.WorkerID,
+			rangeResp.GetJobId(),
+			rangeResp.GetStart(),
+			rangeResp.GetEnd(),
+		)
+
 		result := searchworker.SearchSHA256RangeParallel(
 			rangeResp.GetTargetHash(),
 			rangeResp.GetCharset(),
@@ -83,6 +92,15 @@ func main() {
 			time.Sleep(time.Second)
 			continue
 		}
+		log.Printf(
+			"worker %s completed job %s range [%d,%d) found=%t duration=%s",
+			cfg.WorkerID,
+			rangeResp.GetJobId(),
+			rangeResp.GetStart(),
+			rangeResp.GetEnd(),
+			result.Found,
+			time.Since(startedAt).Round(time.Millisecond),
+		)
 		if result.Found {
 			log.Printf("worker %s found plaintext for job %s: %s", cfg.WorkerID, rangeResp.GetJobId(), result.Plaintext)
 		}

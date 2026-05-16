@@ -29,6 +29,7 @@ services:
       REDIS_ADDR: redis:6379
     ports:
       - "9100:9100"
+      - "9090:9090"
     depends_on:
       - redis
       - postgres

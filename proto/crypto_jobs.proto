@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package cryptojobs.v1;
+
+option go_package = "tp-final-sdp/pkg/api/cryptojobsv1";
+
+service SchedulerService {
+  rpc CreateJob(CreateJobRequest) returns (CreateJobResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  rpc RequestRange(RequestRangeRequest) returns (RequestRangeResponse);
+  rpc ReportRange(ReportRangeRequest) returns (ReportRangeResponse);
+}
+
+message CreateJobRequest {
+  string target_hash = 1;
+  string charset = 2;
+  uint32 min_length = 3;
+  uint32 max_length = 4;
+  uint64 chunk_size = 5;
+}
+
+message CreateJobResponse {
+  string job_id = 1;
+  uint64 total_candidates = 2;
+  uint64 total_ranges = 3;
+}
+
+message GetJobRequest {
+  string job_id = 1;
+}
+
+message GetJobResponse {
+  string job_id = 1;
+  string target_hash = 2;
+  string charset = 3;
+  uint32 min_length = 4;
+  uint32 max_length = 5;
+  string status = 6;
+  string plaintext = 7;
+  uint64 completed_ranges = 8;
+  uint64 total_ranges = 9;
+  uint64 total_candidates = 10;
+}
+
+message RegisterWorkerRequest {
+  string worker_id = 1;
+  string hostname = 2;
+}
+
+message RegisterWorkerResponse {
+  bool accepted = 1;
+}
+
+message RequestRangeRequest {
+  string worker_id = 1;
+}
+
+message RequestRangeResponse {
+  string job_id = 1;
+  uint64 start = 2;
+  uint64 end = 3;
+  bool should_stop = 4;
+  bool has_range = 5;
+  string target_hash = 6;
+  string charset = 7;
+  uint32 min_length = 8;
+  uint32 max_length = 9;
+}
+
+message ReportRangeRequest {
+  string worker_id = 1;
+  string job_id = 2;
+  uint64 start = 3;
+  uint64 end = 4;
+  bool found = 5;
+  string plaintext = 6;
+}
+
+message ReportRangeResponse {
+  bool accepted = 1;
+  bool should_stop = 2;
+}

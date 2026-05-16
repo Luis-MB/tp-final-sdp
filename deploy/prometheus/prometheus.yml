@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: api-gateway
+    static_configs:
+      - targets:
+          - api-gateway:8080
+  - job_name: scheduler
+    static_configs:
+      - targets:
+          - scheduler:9100

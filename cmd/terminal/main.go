@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -18,12 +19,20 @@ import (
 )
 
 const (
-	defaultAPIBaseURL = "http://localhost:8080"
-	defaultCharset    = "abcdefghijklmnopqrstuvwxyz"
-	defaultChunkSize  = 1000
-	maxTerminalRanges = 1_000_000
-	pollInterval      = time.Second
+	defaultAPIBaseURL      = "http://localhost:8080"
+	defaultSchedulerHealth = "http://localhost:9100/healthz"
+	defaultCharset         = "abcdefghijklmnopqrstuvwxyz"
+	defaultChunkSize       = 1000
+	maxTerminalRanges      = 1_000_000
+	pollInterval           = time.Second
 )
+
+type terminalConfig struct {
+	APIBaseURL       string
+	APIToken         string
+	SchedulerHealth  string
+	PostgresEndpoint string
+}
 
 type createJobRequest struct {
 	Password  string `json:"password"`
@@ -51,13 +60,18 @@ type getJobResponse struct {
 }
 
 func main() {
-	apiBaseURL := strings.TrimRight(env("API_BASE_URL", defaultAPIBaseURL), "/")
+	cfg := terminalConfig{
+		APIBaseURL:       strings.TrimRight(env("API_BASE_URL", defaultAPIBaseURL), "/"),
+		APIToken:         env("API_TOKEN", ""),
+		SchedulerHealth:  env("SCHEDULER_HEALTH_URL", defaultSchedulerHealth),
+		PostgresEndpoint: env("POSTGRES_ENDPOINT", "localhost:15432"),
+	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
 		clearScreen()
-		printPorts(apiBaseURL)
+		printHeader(context.Background(), client, cfg)
 
 		req, err := readCreateJobRequest(reader)
 		if err != nil {
@@ -69,14 +83,14 @@ func main() {
 			continue
 		}
 
-		createResp, err := createJob(context.Background(), client, apiBaseURL, req)
+		createResp, err := createJob(context.Background(), client, cfg.APIBaseURL, cfg.APIToken, req)
 		if err != nil {
 			fmt.Printf("\nNo se pudo crear el job: %v\n", err)
 			waitEnter(reader)
 			continue
 		}
 
-		pollJob(context.Background(), client, apiBaseURL, createResp)
+		pollJob(context.Background(), client, cfg, createResp)
 
 		fmt.Print("\nCrear otro job? [s/N]: ")
 		answer, err := readLine(reader)
@@ -123,7 +137,7 @@ func validateSearchSpace(password string, charset string, chunkSize uint64) erro
 	passwordLength := uint32(len(password))
 	totalCandidates, err := searchworker.TotalCandidates(charset, passwordLength, passwordLength)
 	if err != nil {
-		return fmt.Errorf("espacio de busqueda invalido: %w", err)
+		return fmt.Errorf("espacio de busqueda invalido: %w; reduce el charset o usa una password mas corta", err)
 	}
 	totalRanges := ((totalCandidates - 1) / chunkSize) + 1
 	if totalRanges > maxTerminalRanges {
@@ -132,7 +146,7 @@ func validateSearchSpace(password string, charset string, chunkSize uint64) erro
 	return nil
 }
 
-func createJob(ctx context.Context, client *http.Client, apiBaseURL string, request createJobRequest) (createJobResponse, error) {
+func createJob(ctx context.Context, client *http.Client, apiBaseURL string, apiToken string, request createJobRequest) (createJobResponse, error) {
 	body, err := json.Marshal(request)
 	if err != nil {
 		return createJobResponse{}, err
@@ -143,6 +157,7 @@ func createJob(ctx context.Context, client *http.Client, apiBaseURL string, requ
 		return createJobResponse{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	setAuthHeader(httpReq, apiToken)
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -161,15 +176,26 @@ func createJob(ctx context.Context, client *http.Client, apiBaseURL string, requ
 	return createResp, nil
 }
 
-func pollJob(ctx context.Context, client *http.Client, apiBaseURL string, createResp createJobResponse) {
+func pollJob(ctx context.Context, client *http.Client, cfg terminalConfig, createResp createJobResponse) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	startedAt := time.Now()
+	var lastCompleted uint64
+	lastUpdated := startedAt
 
 	for {
-		jobResp, err := getJob(ctx, client, apiBaseURL, createResp.JobID)
+		jobResp, err := getJob(ctx, client, cfg.APIBaseURL, cfg.APIToken, createResp.JobID)
+		now := time.Now()
+		completedDelta := uint64(0)
+		if err == nil && jobResp.CompletedRanges >= lastCompleted {
+			completedDelta = jobResp.CompletedRanges - lastCompleted
+			lastCompleted = jobResp.CompletedRanges
+			lastUpdated = now
+		}
+
 		clearScreen()
-		printPorts(apiBaseURL)
-		printJob(createResp, jobResp, err)
+		printHeader(ctx, client, cfg)
+		printJob(createResp, jobResp, err, now.Sub(startedAt), completedDelta, now.Sub(lastUpdated))
 
 		if err == nil && isFinalStatus(jobResp.Status) {
 			return
@@ -179,11 +205,12 @@ func pollJob(ctx context.Context, client *http.Client, apiBaseURL string, create
 	}
 }
 
-func getJob(ctx context.Context, client *http.Client, apiBaseURL string, jobID string) (getJobResponse, error) {
+func getJob(ctx context.Context, client *http.Client, apiBaseURL string, apiToken string, jobID string) (getJobResponse, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBaseURL+"/jobs/"+jobID, nil)
 	if err != nil {
 		return getJobResponse{}, err
 	}
+	setAuthHeader(httpReq, apiToken)
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -202,25 +229,48 @@ func getJob(ctx context.Context, client *http.Client, apiBaseURL string, jobID s
 	return jobResp, nil
 }
 
-func printPorts(apiBaseURL string) {
+func setAuthHeader(req *http.Request, apiToken string) {
+	if apiToken != "" {
+		req.Header.Set("Authorization", "Bearer "+apiToken)
+	}
+}
+
+func printHeader(ctx context.Context, client *http.Client, cfg terminalConfig) {
 	fmt.Println("TP Final SDP - Terminal")
 	fmt.Println()
 	fmt.Println("Puertos:")
-	fmt.Printf("  API Gateway:       %s\n", apiBaseURL)
+	fmt.Printf("  API Gateway:       %s\n", cfg.APIBaseURL)
 	fmt.Println("  Nginx:             http://localhost:8088")
 	fmt.Println("  Scheduler metrics: http://localhost:9100/metrics")
 	fmt.Println("  Prometheus:        http://localhost:9091")
 	fmt.Println("  Grafana:           http://localhost:3000")
-	fmt.Println("  Redis:             localhost:6379")
-	fmt.Println("  PostgreSQL:        localhost:5432")
+	fmt.Println("  Adminer:           http://localhost:8081")
+	fmt.Printf("  PostgreSQL:        %s\n", cfg.PostgresEndpoint)
+	fmt.Println()
+	fmt.Println("Estado:")
+	fmt.Printf("  API health:        %s\n", healthStatus(ctx, client, cfg.APIBaseURL+"/healthz", ""))
+	fmt.Printf("  Scheduler health:  %s\n", healthStatus(ctx, client, cfg.SchedulerHealth, ""))
+	postgresStatus := tcpStatus(cfg.PostgresEndpoint)
+	fmt.Printf("  PostgreSQL health: %s\n", postgresStatus)
+	if postgresStatus == "ok" {
+		fmt.Println("  Persistencia:      PostgreSQL habilitado")
+	} else {
+		fmt.Println("  Persistencia:      PostgreSQL no disponible")
+	}
+	if cfg.APIToken == "" {
+		fmt.Println("  API token:         desactivado")
+	} else {
+		fmt.Println("  API token:         activado")
+	}
 	fmt.Println()
 }
 
-func printJob(createResp createJobResponse, jobResp getJobResponse, err error) {
+func printJob(createResp createJobResponse, jobResp getJobResponse, err error, elapsed time.Duration, completedDelta uint64, staleFor time.Duration) {
 	fmt.Println("Resultado:")
 	fmt.Printf("  Job ID:            %s\n", createResp.JobID)
 	fmt.Printf("  Candidatos:        %d\n", createResp.TotalCandidates)
 	fmt.Printf("  Rangos totales:    %d\n", createResp.TotalRanges)
+	fmt.Printf("  Tiempo:            %s\n", elapsed.Round(time.Second))
 	if err != nil {
 		fmt.Printf("  Estado:            error consultando job: %v\n", err)
 		return
@@ -230,9 +280,58 @@ func printJob(createResp createJobResponse, jobResp getJobResponse, err error) {
 	fmt.Printf("  Charset:           %s\n", jobResp.Charset)
 	fmt.Printf("  Longitud:          %d\n", jobResp.MinLength)
 	fmt.Printf("  Rangos completos:  %d/%d\n", jobResp.CompletedRanges, jobResp.TotalRanges)
+	fmt.Printf("  Progreso:          %s %.1f%%\n", progressBar(jobResp.CompletedRanges, jobResp.TotalRanges, 24), percent(jobResp.CompletedRanges, jobResp.TotalRanges))
+	fmt.Printf("  Ultimo cambio:     hace %s\n", staleFor.Round(time.Second))
+	fmt.Printf("  Ritmo actual:      +%d rangos/s\n", completedDelta)
 	if jobResp.Plaintext != "" {
 		fmt.Printf("  Password hallada:  %s\n", jobResp.Plaintext)
 	}
+}
+
+func healthStatus(ctx context.Context, client *http.Client, url string, apiToken string) string {
+	reqCtx, cancel := context.WithTimeout(ctx, 700*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return "error"
+	}
+	setAuthHeader(req, apiToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "no disponible"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return "ok"
+	}
+	return fmt.Sprintf("HTTP %d", resp.StatusCode)
+}
+
+func tcpStatus(address string) string {
+	conn, err := net.DialTimeout("tcp", address, 700*time.Millisecond)
+	if err != nil {
+		return "no disponible"
+	}
+	_ = conn.Close()
+	return "ok"
+}
+
+func progressBar(done, total uint64, width int) string {
+	if total == 0 {
+		return strings.Repeat("-", width)
+	}
+	filled := int((done * uint64(width)) / total)
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + "]"
+}
+
+func percent(done, total uint64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return (float64(done) / float64(total)) * 100
 }
 
 func promptRequired(reader *bufio.Reader, label string) (string, error) {

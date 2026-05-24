@@ -11,7 +11,8 @@ type Config struct {
 	APIHTTPAddr          string
 	SchedulerGRPCAddr    string
 	SchedulerMetricsAddr string
-	RedisAddr            string
+	DatabaseURL          string
+	APIToken             string
 	WorkerID             string
 	WorkerConcurrency    int
 	RangeLeaseTTL        time.Duration
@@ -22,7 +23,8 @@ func Load() Config {
 		APIHTTPAddr:          env("API_HTTP_ADDR", ":8080"),
 		SchedulerGRPCAddr:    env("SCHEDULER_GRPC_ADDR", ":9090"),
 		SchedulerMetricsAddr: env("SCHEDULER_METRICS_ADDR", ":9100"),
-		RedisAddr:            env("REDIS_ADDR", "localhost:6379"),
+		DatabaseURL:          env("DATABASE_URL", ""),
+		APIToken:             env("API_TOKEN", ""),
 		WorkerID:             env("WORKER_ID", ""),
 		WorkerConcurrency:    envInt("WORKER_CONCURRENCY", runtime.NumCPU()),
 		RangeLeaseTTL:        envDuration("SCHEDULER_RANGE_LEASE_TTL", 30*time.Second),

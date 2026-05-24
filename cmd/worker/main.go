@@ -23,7 +23,7 @@ func main() {
 	if cfg.WorkerID == "" {
 		cfg.WorkerID = "worker-local"
 	}
-	log.Printf("worker %s starting; scheduler=%s redis=%s concurrency=%d", cfg.WorkerID, cfg.SchedulerGRPCAddr, cfg.RedisAddr, cfg.WorkerConcurrency)
+	log.Printf("worker %s starting; scheduler=%s concurrency=%d", cfg.WorkerID, cfg.SchedulerGRPCAddr, cfg.WorkerConcurrency)
 
 	conn, err := grpc.NewClient(cfg.SchedulerGRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {

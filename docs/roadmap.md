@@ -17,8 +17,8 @@
 ## Paso 3 - Scheduler
 
 - Creacion de jobs.
-- Encolado de rangos en Redis.
-- Persistencia inicial en PostgreSQL.
+- Particionado y asignacion de rangos.
+- Persistencia de jobs, rangos, leases y resultados en PostgreSQL.
 - API de estado.
 
 ## Paso 4 - Worker

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	internalcrypto "tp-final-sdp/internal/crypto"
@@ -40,5 +42,33 @@ func TestNormalizeCreateJobRequestUsesDefaultLengths(t *testing.T) {
 	}
 	if req.MaxLength != defaultMaxLength {
 		t.Fatalf("MaxLength = %d, want %d", req.MaxLength, defaultMaxLength)
+	}
+}
+
+func TestRequireTokenRejectsMissingToken(t *testing.T) {
+	handler := requireToken("secret", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	recorder := httptest.NewRecorder()
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/jobs", nil))
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestRequireTokenAcceptsBearerToken(t *testing.T) {
+	handler := requireToken("secret", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/jobs", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+
+	recorder := httptest.NewRecorder()
+	handler(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
 	}
 }

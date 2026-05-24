@@ -58,6 +58,33 @@ Metricas propias relevantes:
 - `crypto_ranges_completed_total`
 - `crypto_ranges_expired_total`
 
+## Persistencia
+
+El scheduler usa PostgreSQL si `DATABASE_URL` esta definido. En Compose queda
+configurado contra el servicio `postgres`, por lo que jobs, rangos, leases y
+resultados se guardan en la base. Si el scheduler se reinicia, vuelve a cargar
+ese estado.
+
+```bash
+DATABASE_URL=postgres://sdp:sdp@postgres:5432/crypto_jobs?sslmode=disable
+```
+
+## Token De API
+
+Para exigir autenticacion en `/jobs`, levantar el entorno con `API_TOKEN`:
+
+```bash
+API_TOKEN=dev-secret podman-compose up --build
+```
+
+Los clientes deben enviar:
+
+```bash
+Authorization: Bearer dev-secret
+```
+
+La interfaz de terminal tambien lee `API_TOKEN` del entorno.
+
 ## Crear Job De Prueba
 
 El siguiente ejemplo busca la cadena `ab` usando SHA-256 y un espacio de busqueda
@@ -115,3 +142,5 @@ API_BASE_URL=http://localhost:8088 make terminal
 - Scheduler metrics: `http://localhost:9100/metrics`
 - Prometheus: `http://localhost:9091`
 - Grafana: `http://localhost:3000`
+- Adminer: `http://localhost:8081`
+- PostgreSQL: `localhost:15432`

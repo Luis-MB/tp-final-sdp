@@ -2,11 +2,11 @@
 
 ## Decision
 
-Usar Go, gRPC, Redis, PostgreSQL, Nginx, Podman Compose, Prometheus y Grafana.
+Usar Go, gRPC, PostgreSQL, Nginx, Podman Compose, Prometheus y Grafana.
 
 ## Motivo
 
-Go permite workers concurrentes y servicios livianos. gRPC define contratos claros entre scheduler y workers. Redis resuelve coordinacion de baja latencia. PostgreSQL aporta persistencia durable y consultable. Prometheus/Grafana permiten justificar rendimiento con metricas.
+Go permite workers concurrentes y servicios livianos. gRPC define contratos claros entre scheduler y workers. PostgreSQL aporta persistencia durable y consultable para jobs, rangos, leases y resultados. Prometheus/Grafana permiten justificar rendimiento con metricas.
 
 ## Alternativas
 

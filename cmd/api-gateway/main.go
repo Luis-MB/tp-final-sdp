@@ -47,13 +47,26 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/jobs", handleJobs(schedulerClient))
-	mux.HandleFunc("/jobs/", handleJob(schedulerClient))
+	mux.HandleFunc("/jobs", requireToken(cfg.APIToken, handleJobs(schedulerClient)))
+	mux.HandleFunc("/jobs/", requireToken(cfg.APIToken, handleJob(schedulerClient)))
 	mux.Handle("/metrics", metrics.Handler())
 
 	log.Printf("api-gateway listening on %s", cfg.APIHTTPAddr)
 	if err := http.ListenAndServe(cfg.APIHTTPAddr, mux); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func requireToken(token string, next http.HandlerFunc) http.HandlerFunc {
+	if token == "" {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
 	}
 }
 

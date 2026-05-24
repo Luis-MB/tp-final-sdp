@@ -25,3 +25,5 @@ CREATE TABLE IF NOT EXISTS search_ranges (
 CREATE INDEX IF NOT EXISTS idx_search_ranges_job_status
   ON search_ranges(job_id, status);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_search_ranges_job_bounds
+  ON search_ranges(job_id, range_start, range_end);

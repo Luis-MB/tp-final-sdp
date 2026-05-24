@@ -5,11 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
 	"tp-final-sdp/internal/domain"
 	"tp-final-sdp/internal/metrics"
+	"tp-final-sdp/internal/repository"
 	"tp-final-sdp/internal/worker"
 	cryptojobsv1 "tp-final-sdp/pkg/api/cryptojobsv1"
 )
@@ -21,6 +23,14 @@ const defaultLeaseTTL = 30 * time.Second
 type Options struct {
 	LeaseTTL time.Duration
 	Now      func() time.Time
+	Store    Store
+}
+
+type Store interface {
+	LoadJobs(context.Context) ([]repository.JobSnapshot, error)
+	SaveJob(context.Context, repository.JobSnapshot) error
+	UpdateRange(context.Context, string, repository.RangeSnapshot) error
+	UpdateJob(context.Context, string, domain.JobStatus, string) error
 }
 
 type Server struct {
@@ -31,6 +41,7 @@ type Server struct {
 	workers  map[string]string
 	leaseTTL time.Duration
 	now      func() time.Time
+	store    Store
 }
 
 type jobState struct {
@@ -66,16 +77,52 @@ func NewServerWithOptions(options Options) *Server {
 		workers:  make(map[string]string),
 		leaseTTL: leaseTTL,
 		now:      now,
+		store:    options.Store,
 	}
 }
 
-func (s *Server) CreateJob(_ context.Context, req *cryptojobsv1.CreateJobRequest) (*cryptojobsv1.CreateJobResponse, error) {
+func (s *Server) LoadPersistedJobs(ctx context.Context) error {
+	if s.store == nil {
+		return nil
+	}
+	snapshots, err := s.store.LoadJobs(ctx)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, snapshot := range snapshots {
+		state := &jobState{
+			job:             snapshot.Job,
+			plaintext:       snapshot.Plaintext,
+			totalCandidates: snapshot.TotalCandidates,
+			ranges:          make([]rangeState, 0, len(snapshot.Ranges)),
+		}
+		for _, searchRange := range snapshot.Ranges {
+			state.ranges = append(state.ranges, rangeState{
+				start:       searchRange.Start,
+				end:         searchRange.End,
+				status:      searchRange.Status,
+				workerID:    searchRange.WorkerID,
+				leasedUntil: searchRange.LeasedUntil,
+			})
+		}
+		s.jobs[snapshot.Job.ID] = state
+	}
+	return nil
+}
+
+func (s *Server) CreateJob(ctx context.Context, req *cryptojobsv1.CreateJobRequest) (*cryptojobsv1.CreateJobResponse, error) {
 	if req.GetTargetHash() == "" {
 		return nil, fmt.Errorf("target_hash is required")
 	}
 	totalCandidates, err := worker.TotalCandidates(req.GetCharset(), req.GetMinLength(), req.GetMaxLength())
 	if err != nil {
 		return nil, err
+	}
+	if totalCandidates > math.MaxInt64 {
+		return nil, fmt.Errorf("candidate space is too large: %d candidates exceeds storage limit", totalCandidates)
 	}
 
 	chunkSize := req.GetChunkSize()
@@ -105,9 +152,7 @@ func (s *Server) CreateJob(_ context.Context, req *cryptojobsv1.CreateJobRequest
 		return nil, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.jobs[jobID] = &jobState{
+	state := &jobState{
 		job: domain.Job{
 			ID:         jobID,
 			TargetHash: req.GetTargetHash(),
@@ -119,6 +164,15 @@ func (s *Server) CreateJob(_ context.Context, req *cryptojobsv1.CreateJobRequest
 		totalCandidates: totalCandidates,
 		ranges:          ranges,
 	}
+	if s.store != nil {
+		if err := s.store.SaveJob(ctx, state.snapshot()); err != nil {
+			return nil, err
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jobs[jobID] = state
 
 	return &cryptojobsv1.CreateJobResponse{
 		JobId:           jobID,
@@ -159,7 +213,11 @@ func (s *Server) RequestRange(_ context.Context, req *cryptojobsv1.RequestRangeR
 		if state.job.Status != domain.JobStatusRunning {
 			continue
 		}
-		state.reclaimExpiredLeases(now)
+		for _, expiredRange := range state.reclaimExpiredLeases(now) {
+			if err := s.persistRange(context.Background(), state.job.ID, expiredRange); err != nil {
+				return nil, err
+			}
+		}
 		for index := range state.ranges {
 			if state.ranges[index].status != domain.RangeStatusPending {
 				continue
@@ -167,6 +225,12 @@ func (s *Server) RequestRange(_ context.Context, req *cryptojobsv1.RequestRangeR
 			state.ranges[index].status = domain.RangeStatusLeased
 			state.ranges[index].workerID = req.GetWorkerId()
 			state.ranges[index].leasedUntil = now.Add(s.leaseTTL)
+			if err := s.persistRange(context.Background(), state.job.ID, state.ranges[index]); err != nil {
+				state.ranges[index].status = domain.RangeStatusPending
+				state.ranges[index].workerID = ""
+				state.ranges[index].leasedUntil = time.Time{}
+				return nil, err
+			}
 			metrics.RangesAssigned.Inc()
 			return &cryptojobsv1.RequestRangeResponse{
 				JobId:      state.job.ID,
@@ -202,6 +266,9 @@ func (s *Server) ReportRange(_ context.Context, req *cryptojobsv1.ReportRangeReq
 			state.ranges[index].status = domain.RangeStatusCompleted
 			state.ranges[index].workerID = req.GetWorkerId()
 			state.ranges[index].leasedUntil = time.Time{}
+			if err := s.persistRange(context.Background(), state.job.ID, state.ranges[index]); err != nil {
+				return nil, err
+			}
 			metrics.RangesCompleted.Inc()
 			break
 		}
@@ -210,15 +277,63 @@ func (s *Server) ReportRange(_ context.Context, req *cryptojobsv1.ReportRangeReq
 	if req.GetFound() && state.job.Status == domain.JobStatusRunning {
 		state.job.Status = domain.JobStatusFound
 		state.plaintext = req.GetPlaintext()
+		if err := s.persistJob(context.Background(), state); err != nil {
+			return nil, err
+		}
 		metrics.JobsFound.Inc()
 		return &cryptojobsv1.ReportRangeResponse{Accepted: true, ShouldStop: true}, nil
 	}
 
+	previousStatus := state.job.Status
 	state.markExhaustedIfComplete()
+	if state.job.Status != previousStatus {
+		if err := s.persistJob(context.Background(), state); err != nil {
+			return nil, err
+		}
+	}
 	return &cryptojobsv1.ReportRangeResponse{
 		Accepted:   true,
 		ShouldStop: state.job.Status == domain.JobStatusFound,
 	}, nil
+}
+
+func (s *jobState) snapshot() repository.JobSnapshot {
+	snapshot := repository.JobSnapshot{
+		Job:             s.job,
+		Plaintext:       s.plaintext,
+		TotalCandidates: s.totalCandidates,
+		Ranges:          make([]repository.RangeSnapshot, 0, len(s.ranges)),
+	}
+	for _, searchRange := range s.ranges {
+		snapshot.Ranges = append(snapshot.Ranges, repository.RangeSnapshot{
+			Start:       searchRange.start,
+			End:         searchRange.end,
+			Status:      searchRange.status,
+			WorkerID:    searchRange.workerID,
+			LeasedUntil: searchRange.leasedUntil,
+		})
+	}
+	return snapshot
+}
+
+func (s *Server) persistRange(ctx context.Context, jobID string, searchRange rangeState) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.UpdateRange(ctx, jobID, repository.RangeSnapshot{
+		Start:       searchRange.start,
+		End:         searchRange.end,
+		Status:      searchRange.status,
+		WorkerID:    searchRange.workerID,
+		LeasedUntil: searchRange.leasedUntil,
+	})
+}
+
+func (s *Server) persistJob(ctx context.Context, state *jobState) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.UpdateJob(ctx, state.job.ID, state.job.Status, state.plaintext)
 }
 
 func (s *jobState) response() *cryptojobsv1.GetJobResponse {
@@ -246,7 +361,8 @@ func (s *jobState) completedRanges() uint64 {
 	return completed
 }
 
-func (s *jobState) reclaimExpiredLeases(now time.Time) {
+func (s *jobState) reclaimExpiredLeases(now time.Time) []rangeState {
+	var expired []rangeState
 	for index := range s.ranges {
 		searchRange := &s.ranges[index]
 		if searchRange.status != domain.RangeStatusLeased {
@@ -258,8 +374,10 @@ func (s *jobState) reclaimExpiredLeases(now time.Time) {
 		searchRange.status = domain.RangeStatusPending
 		searchRange.workerID = ""
 		searchRange.leasedUntil = time.Time{}
+		expired = append(expired, *searchRange)
 		metrics.RangesExpired.Inc()
 	}
+	return expired
 }
 
 func (s *jobState) markExhaustedIfComplete() {

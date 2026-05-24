@@ -6,7 +6,6 @@ Sistema distribuido para dividir el espacio de busqueda de una contrasena cifrad
 
 - Go 1.25+
 - gRPC
-- Redis
 - PostgreSQL
 - Nginx
 - Podman Compose
@@ -19,7 +18,6 @@ Sistema distribuido para dividir el espacio de busqueda de una contrasena cifrad
 - `api-gateway`: API HTTP para crear jobs y consultar estado.
 - `scheduler`: coordina rangos, workers y cancelacion global.
 - `worker`: consume rangos y prueba combinaciones.
-- `redis`: cola de rangos, heartbeats y senales de cancelacion.
 - `postgres`: persistencia de jobs, resultados, rangos y metricas historicas.
 - `prometheus`: recoleccion de metricas.
 - `grafana`: visualizacion de metricas.
@@ -101,5 +99,31 @@ rango luego del vencimiento.
 Prometheus recolecta metricas de la API y del scheduler. El scheduler expone
 contadores de rangos asignados, completados, vencidos y jobs encontrados en
 `http://localhost:9100/metrics`.
+
+Adminer expone una interfaz web para revisar PostgreSQL en
+`http://localhost:8081`. Usar sistema `PostgreSQL`, servidor `postgres`,
+usuario `sdp`, password `sdp` y base `crypto_jobs`.
+
+## Resiliencia Y Seguridad
+
+El scheduler persiste jobs y rangos en PostgreSQL cuando `DATABASE_URL` esta
+configurado. Al reiniciar, carga el estado persistido y puede continuar
+asignando rangos pendientes o leases vencidos.
+
+La API puede proteger los endpoints `/jobs` con token bearer:
+
+```bash
+API_TOKEN=dev-secret podman-compose up --build
+```
+
+Con token activo, las consultas deben enviar:
+
+```bash
+Authorization: Bearer dev-secret
+```
+
+Los servicios principales tienen healthchecks en Compose. El scheduler tambien
+reintenta la conexion a PostgreSQL durante el arranque para tolerar que la base
+tarde unos segundos en aceptar conexiones.
 
 > Nota: este scaffold define estructura y contratos iniciales. La logica completa de fuerza bruta se implementa por etapas.

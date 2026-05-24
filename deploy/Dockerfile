@@ -7,7 +7,7 @@ COPY go.mod ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/service ./cmd/${SERVICE}
+RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -o /out/service ./cmd/${SERVICE}
 
 FROM alpine:3.20
 

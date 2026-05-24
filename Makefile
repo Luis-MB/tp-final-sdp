@@ -1,4 +1,4 @@
-.PHONY: test run terminal compose-up compose-terminal compose-down proto
+.PHONY: test run terminal terminal-up compose-up compose-terminal compose-down proto
 
 test:
 	go test ./...
@@ -7,6 +7,10 @@ run:
 	go run -buildvcs=false ./cmd/api-gateway
 
 terminal:
+	go run -buildvcs=false ./cmd/terminal
+
+terminal-up:
+	podman-compose up --build -d postgres scheduler api-gateway worker
 	go run -buildvcs=false ./cmd/terminal
 
 compose-up:
